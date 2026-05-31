@@ -141,6 +141,7 @@ def train_gpt2(model, dataloader, criterion, optimizer, device):
             shift_labels.view(-1)
         )
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 梯度裁剪，防止深度模型训练出现梯度爆炸
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(dataloader)

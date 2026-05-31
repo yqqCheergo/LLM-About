@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads):
+    def __init__(self, d_model, num_heads, dropout=0.1):
         super(MultiHeadAttention, self).__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model = d_model
@@ -16,12 +16,15 @@ class MultiHeadAttention(nn.Module):
         self.W_v = nn.Linear(d_model, d_model)
         self.W_o = nn.Linear(d_model, d_model)
 
+        self.dropout = nn.Dropout(dropout)
+
     def attention(self, Q, K, V, mask=None):
         # softmax((Q * K^T) / sqrt(d_k)) * V
         scores = torch.matmul(Q, K.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.d_k, dtype=torch.float32))
         if mask is not None:
             scores = scores.masked_fill(mask == 0, -1e9)    # 需要mask的地方用一个很大的负数填充，softmax后为0
         attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
         output = torch.matmul(attn_weights, V)
         return output
 
@@ -44,42 +47,45 @@ class MultiHeadAttention(nn.Module):
 
 
 class PositionwiseFeedForward(nn.Module):
-    def __init__(self, d_model, d_ff):
+    def __init__(self, d_model, d_ff, dropout=0.1):
         super(PositionwiseFeedForward, self).__init__()
         self.fc1 = nn.Linear(d_model, d_ff)   # d_model × 4 = d_ff
         self.fc2 = nn.Linear(d_ff, d_model)
         self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.fc2(self.relu(self.fc1(x)))
+        return self.fc2(self.dropout(self.relu(self.fc1(x))))
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, d_model, num_heads, d_ff):
+    def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
         super(DecoderLayer, self).__init__()
-        self.self_attn = MultiHeadAttention(d_model, num_heads)
-        self.feed_forward = PositionwiseFeedForward(d_model, d_ff)
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.feed_forward = PositionwiseFeedForward(d_model, d_ff, dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask):
         attn_output = self.self_attn(x, x, x, mask)    # 3个x 分别代表 Q, K, V
-        x = self.norm1(x + attn_output)    # add & norm
+        x = self.norm1(x + self.dropout(attn_output))    # add & norm
         ff_output = self.feed_forward(x)
-        x = self.norm2(x + ff_output)      # add & norm
+        x = self.norm2(x + self.dropout(ff_output))      # add & norm
         return x
 
 
 class GPT1(nn.Module):
-    def __init__(self, vocab_size, d_model, num_heads, num_layers, max_seq_length, d_ff):
+    def __init__(self, vocab_size, d_model, num_heads, num_layers, max_seq_length, d_ff, dropout=0.1):
         super(GPT1, self).__init__()
         self.token_embeddings = nn.Embedding(vocab_size, d_model)
         self.position_embeddings = nn.Embedding(max_seq_length, d_model)
         self.decoder_layers = nn.ModuleList([
-            DecoderLayer(d_model, num_heads, d_ff) for _ in range(num_layers)   # num_layers 层 Decoder 堆叠
+            DecoderLayer(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)   # num_layers 层 Decoder 堆叠
         ])
         self.fc = nn.Linear(d_model, vocab_size)
         self.max_seq_length = max_seq_length
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, input_ids):
         seq_length = input_ids.size(1)
@@ -89,6 +95,7 @@ class GPT1(nn.Module):
         token_embeds = self.token_embeddings(input_ids)
         position_embeds = self.position_embeddings(positions)
         embeddings = token_embeds + position_embeds
+        embeddings = self.dropout(embeddings)
         # torch.tril() - 取矩阵的下三角部分，上三角置0
         mask = torch.tril(torch.ones(seq_length, seq_length, device=input_ids.device)).unsqueeze(0).unsqueeze(0)   # [batch_dim, head_dim, seq_len, seq_len]
 
@@ -116,6 +123,7 @@ def train_gpt1(model, dataloader, criterion, optimizer, device):
             shift_labels.view(-1)   # [batch_size*(seq_len-1)]  每个预测位置对应一个标签值
         )
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)   # 梯度裁剪，防止深度模型训练出现梯度爆炸
         optimizer.step()
         total_loss += loss.item()
     return total_loss / len(dataloader)
